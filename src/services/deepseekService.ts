@@ -1,62 +1,104 @@
 import { ChatMessage } from '../types/crypto'
 import { config } from '../utils/config'
 
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
-// We'll validate the API key when making requests instead of at initialization
-if (config.ai.deepseekKey) {
-  console.log('DeepSeek Service: Initialized with API key:', config.ai.deepseekKey.substring(0, 5) + '...')
-} else {
-  console.warn('DeepSeek Service: No API key provided. Please set NEXT_PUBLIC_DEEPSEEK_API_KEY in your environment variables.')
+interface DeepSeekMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
 }
+
+interface DeepSeekChoice {
+  message: DeepSeekMessage
+  finish_reason?: string
+  index: number
+}
+
+interface DeepSeekResponse {
+  id: string
+  object: string
+  created: number
+  model: string
+  choices: DeepSeekChoice[]
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
+  error?: {
+    message: string
+    type?: string
+    code?: string
+  }
+}
+
+interface DeepSeekRequest {
+  model: string
+  messages: DeepSeekMessage[]
+  temperature: number
+  max_tokens: number
+  stream: boolean
+}
+
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
+const DEEPSEEK_MODEL = 'deepseek-chat'
 
 const COMMANDS = {
   ANALYZE: '/analyze'
 }
 
-const systemPrompt = `You are a cryptocurrency market analyst and trading assistant. Your role is to analyze market data and provide clear, data-driven insights. When given market data, analyze it thoroughly and present your findings in a structured format.
+const systemPrompt = `You are a cryptocurrency market analyst and trading assistant. Your role is to analyze market data and provide clear, data-driven insights. Present your analysis in a clean, modern format with clear sections.
 
 For analysis requests, structure your response as follows:
 
-1. MARKET SUMMARY
-- Current price and 24h change
-- Trading volume analysis
-- Market capitalization context
+MARKET SUMMARY
+• Current Price & 24h Change
+• Trading Volume Overview
+• Market Cap Analysis
 
-2. TECHNICAL ANALYSIS
-- Price trends and patterns
-- Support and resistance levels
-- Volume analysis
-- Key technical indicators
+TECHNICAL ANALYSIS
+• Trend Analysis
+• Key Support & Resistance
+• Volume Patterns
+• Technical Indicators
 
-3. MARKET SENTIMENT
-- Overall market sentiment
-- News sentiment impact
-- Social sentiment signals
-- Fear & Greed context
+MARKET SENTIMENT
+• Overall Market Mood
+• News Impact
+• Social Media Signals
+• Fear & Greed Index
 
-4. RISKS AND OPPORTUNITIES
-- Potential upside catalysts
-- Downside risks
-- Key levels to watch
-- Market positioning
+RISKS VS OPPORTUNITIES
+• Growth Catalysts
+• Risk Factors
+• Key Price Levels
+• Market Position
 
-5. RECOMMENDATION SUMMARY
-- Short-term outlook (24-48 hours)
-- Medium-term perspective (1-4 weeks)
-- Key action points for traders
-- Risk management suggestions
+TRADING INSIGHTS
+• Short-term View (24-48h)
+• Mid-term Outlook (1-4w)
+• Action Steps
+• Risk Management Tips
 
-Always conclude with these important disclaimers:
-• This analysis is for informational purposes only
-• Cryptocurrency markets are highly volatile
-• Past performance doesn't guarantee future results
-• Never invest more than you can afford to lose
-• Always do your own research (DYOR)
-`
+IMPORTANT NOTES
+• For information only
+• High volatility market
+• Past ≠ Future results
+• Invest responsibly
+• DYOR
+
+Format numbers nicely (e.g., $52.5K instead of $52,500).
+Use bullet points for better readability.
+Keep sections concise but informative.
+Ensure each section is separated by a blank line for clarity.
+Present data in an organized, easy-to-scan format.`
+
+interface DeepSeekError extends Error {
+  status?: number
+  statusText?: string
+  response?: Response
+}
 
 export const deepseekService = {
   generateResponse: async (userMessage: string): Promise<ChatMessage> => {
-    console.log('Generating response for:', userMessage)
     try {
       // Check for analysis command
       if (userMessage.startsWith(COMMANDS.ANALYZE)) {
@@ -80,147 +122,295 @@ export const deepseekService = {
 
 Please format your response in clear sections and include relevant disclaimers about market volatility and risk.`
       }
-      console.log('Calling DeepSeek API...')
-      if (!config.ai.deepseekKey) {
-        throw new Error('DeepSeek API key is required. Please set NEXT_PUBLIC_DEEPSEEK_API_KEY in your environment variables.')
-      }
 
-      const requestBody = {
-        model: 'deepseek-chat',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage }
-        ],
-        temperature: 0.7,
-        max_tokens: 2000,
-        stream: false
-      }
-
-      console.log('DeepSeek Service: Sending request:', JSON.stringify(requestBody, null, 2))
-
-      // Log the full request details for debugging
-      console.log('DeepSeek API request URL:', DEEPSEEK_API_URL)
-      console.log('DeepSeek API headers:', {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.ai.deepseekKey}`
-      })
-
-      // Clean and validate the API key
+      // Validate API key
       if (!config.ai.deepseekKey?.trim()) {
         throw new Error('DeepSeek API key is missing or invalid')
       }
       const cleanKey = config.ai.deepseekKey.trim()
       
-      const response = await fetch(DEEPSEEK_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${cleanKey}`,
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(requestBody),
-        cache: 'no-cache',
-        mode: 'cors'
-      })
+      // Validate API key format
+      if (!cleanKey.startsWith('sk-')) {
+        throw new Error('Invalid DeepSeek API key format. Key should start with "sk-"')
+      }
 
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.error('DeepSeek API error response:', {
-          status: response.status,
-          statusText: response.statusText,
-          error: errorText
-        })
-        
-        let errorMessage = 'An error occurred while processing your request.'
+      const maxRetries = 3
+      let lastError = null
+      let data: DeepSeekResponse | null = null
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          const errorData = JSON.parse(errorText)
-          if (errorData.error?.message) {
-            errorMessage = errorData.error.message
+          // Prepare request
+          const requestBody: DeepSeekRequest = {
+            model: DEEPSEEK_MODEL,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage }
+            ],
+            temperature: 0.7,
+            max_tokens: 2000,
+            stream: false
           }
-        } catch (e) {
-          console.error('Error parsing error response:', e)
-        }
 
-        throw new Error(`DeepSeek API error: ${errorMessage}`)
-      }
+          // Validate request
+          if (!requestBody.messages.length) {
+            throw new Error('No messages provided')
+          }
 
-      console.log('DeepSeek API response status:', response.status)
-      console.log('DeepSeek API response headers:', Object.fromEntries(response.headers.entries()))
-      
-      const responseText = await response.text()
-      console.log('DeepSeek API raw response:', responseText)
-      
-      // Handle empty responses
-      if (!responseText.trim()) {
-        console.error('Empty response from DeepSeek API')
-        return {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: 'I apologize, but I was unable to generate a response at this time. Please try again.',
-          timestamp: Date.now()
-        }
-      }
-      
-      try {
-        const data = JSON.parse(responseText)
-        console.log('DeepSeek API response:', data)
+          if (requestBody.messages.some(msg => !msg.content?.trim())) {
+            throw new Error('Empty message content')
+          }
 
-        if (!data.choices?.[0]?.message?.content) {
-          // Log more details about the response
-          console.error('Invalid response format from DeepSeek API:', {
-            data,
-            status: response.status,
-            headers: Object.fromEntries(response.headers.entries())
+          // Log request (redact sensitive info)
+          console.log('DeepSeek request:', {
+            url: DEEPSEEK_API_URL,
+            model: requestBody.model,
+            messageCount: requestBody.messages.length,
+            systemPromptLength: requestBody.messages[0].content.length,
+            userMessageLength: requestBody.messages[1].content.length,
+            settings: {
+              temperature: requestBody.temperature,
+              max_tokens: requestBody.max_tokens,
+              stream: requestBody.stream
+            }
           })
 
-          // Check for specific error cases
-          if (data.error) {
-            console.error('DeepSeek API error:', data.error)
-            return {
-              id: Date.now().toString(),
-              role: 'assistant',
-              content: `I encountered an error: ${data.error.message || 'Unknown error'}. Please try again.`,
-              timestamp: Date.now()
+          console.log('Making DeepSeek API request...')
+          let response
+          try {
+            response = await fetch(DEEPSEEK_API_URL, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${cleanKey}`,
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify(requestBody)
+            })
+          } catch (error) {
+            const networkError = error as DeepSeekError
+            lastError = networkError
+            console.error(`Attempt ${attempt}/${maxRetries} - Network error:`, {
+              message: networkError.message,
+              cause: networkError.cause,
+              url: DEEPSEEK_API_URL
+            })
+            
+            if (attempt === maxRetries) {
+              throw new Error(`Failed to connect to DeepSeek API after ${maxRetries} attempts: ${error.message}`)
+            }
+            
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt - 1), 5000)))
+            continue
+          }
+
+          // Log response details
+          console.log('DeepSeek response:', {
+            status: response.status,
+            statusText: response.statusText,
+            contentType: response.headers.get('content-type'),
+            requestId: response.headers.get('x-request-id')
+          })
+
+          // Get response text and headers
+          const responseBuffer = await response.arrayBuffer()
+          const contentType = response.headers.get('content-type')
+          const contentLength = response.headers.get('content-length')
+
+          // Convert buffer to text with UTF-8 encoding
+          const responseText = new TextDecoder('utf-8', { fatal: true }).decode(responseBuffer)
+
+          // Log response details
+          console.log('DeepSeek response:', {
+            byteLength: responseBuffer.byteLength,
+            textLength: responseText.length,
+            preview: responseText.slice(0, 100) + (responseText.length > 100 ? '...' : ''),
+            status: response.status,
+            contentType,
+            contentLength,
+            allHeaders: Object.fromEntries(response.headers.entries())
+          })
+
+          // Handle response status
+          if (!response.ok) {
+            console.error('DeepSeek API error:', {
+              status: response.status,
+              statusText: response.statusText,
+              contentType,
+              contentLength,
+              responsePreview: responseText.slice(0, 200)
+            })
+
+            if (response.status === 401) {
+              throw new Error('Authentication failed. Please check your DeepSeek API key.')
+            } else if (response.status === 429) {
+              throw new Error('Rate limit exceeded. Please try again in a moment.')
+            } else {
+              throw new Error(`DeepSeek API error: ${response.status} ${response.statusText}`)
             }
           }
 
-          return {
-            id: Date.now().toString(),
-            role: 'assistant',
-            content: 'I received an invalid response format. Please try your request again.',
-            timestamp: Date.now()
+          // Validate content type
+          if (!contentType?.includes('application/json')) {
+            console.error('Invalid content type from DeepSeek API:', {
+              contentType,
+              contentLength,
+              responsePreview: responseText.slice(0, 200)
+            })
+            throw new Error(`Invalid content type from DeepSeek API: ${contentType}`)
           }
-        }
 
-        return {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: data.choices[0].message.content,
-          timestamp: Date.now()
-        }
-      } catch (parseError) {
-        console.error('Error parsing DeepSeek API response:', parseError)
-        return {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: 'I encountered an error processing the response. Please try again.',
-          timestamp: Date.now()
+          // Handle empty responses
+          if (!responseBuffer.byteLength || !responseText.trim()) {
+            console.error('Empty response from DeepSeek API:', {
+              status: response.status,
+              statusText: response.statusText,
+              contentType,
+              contentLength,
+              byteLength: responseBuffer.byteLength,
+              textLength: responseText.length,
+              rawBuffer: Array.from(new Uint8Array(responseBuffer)).join(','),
+              allHeaders: Object.fromEntries(response.headers.entries())
+            })
+            throw new Error(`Empty response from DeepSeek API (Status: ${response.status}, Bytes: ${responseBuffer.byteLength})`)
+          }
+
+          // Parse and validate JSON response
+          try {
+            console.log('Starting response validation:', {
+              responseLength: responseText.length,
+              firstChars: responseText.slice(0, 50),
+              lastChars: responseText.slice(-50),
+              isEmptyOrWhitespace: !responseText.trim(),
+              contentType,
+              status: response.status
+            })
+
+            // First check if we actually have content
+            if (!responseText.trim()) {
+              throw new Error('Empty response body')
+            }
+
+            // Try to parse as JSON
+            let parsed: any
+            try {
+              parsed = JSON.parse(responseText)
+            } catch (parseError) {
+              console.error('JSON parse error:', {
+                error: (parseError as Error).message,
+                responsePreview: responseText.slice(0, 200)
+              })
+              throw new Error(`Failed to parse JSON: ${(parseError as Error).message}`)
+            }
+
+            console.log('Parsed response structure:', {
+              hasChoices: 'choices' in parsed,
+              choicesType: typeof parsed.choices,
+              hasError: 'error' in parsed,
+              responseKeys: Object.keys(parsed)
+            })
+
+            // Validate response structure
+            if (!parsed || typeof parsed !== 'object') {
+              throw new Error('Response is not an object')
+            }
+
+            // Check for API error response
+            if ('error' in parsed) {
+              throw new Error(`API Error: ${(parsed as { error: { message: string } }).error.message}`)
+            }
+
+            // Validate required fields
+            if (!Array.isArray(parsed.choices)) {
+              throw new Error('Response missing choices array')
+            }
+
+            if (!parsed.choices.length) {
+              throw new Error('Response has empty choices array')
+            }
+
+            const choice = parsed.choices[0]
+            if (!choice.message?.content) {
+              throw new Error('Response missing message content')
+            }
+
+            // If all validation passes, assign to data
+            data = parsed as DeepSeekResponse
+            console.log('Validated DeepSeek response:', {
+              id: data.id,
+              model: data.model,
+              choicesCount: data.choices.length,
+              contentLength: data.choices[0].message.content.length,
+              firstContentChars: data.choices[0].message.content.slice(0, 50)
+            })
+            
+            // If we got here, the request was successful
+            break
+          } catch (error) {
+            const parseError = error as Error
+            lastError = new Error(`Response validation failed: ${parseError.message}`)
+            console.error(`Attempt ${attempt}/${maxRetries} failed:`, {
+              error: parseError.message,
+              responseText: responseText.slice(0, 200),
+              responseLength: responseText.length,
+              status: response.status,
+              contentType
+            })
+            
+            if (attempt === maxRetries) {
+              throw lastError
+            }
+            
+            // Wait before retrying (exponential backoff)
+            await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt - 1), 5000)))
+            continue
+          }
+        } catch (error) {
+          const retryError = error as DeepSeekError
+          lastError = retryError
+          if (attempt === maxRetries) {
+            throw retryError
+          }
+          continue
         }
       }
-    } catch (error: any) {
+
+      // Final validation after all retries
+      if (!data) {
+        throw new Error('No valid response data after all retries')
+      }
+
+      // Get first choice - we've already validated the structure in the try block
+      const choice = data.choices[0]
+      
+      // One final check of the content
+      if (!choice?.message?.content?.trim()) {
+        throw new Error('Missing or empty content in validated response')
+      }
+
+      // Return successful response
+      return {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: choice.message.content.trim(),
+        timestamp: Date.now()
+      }
+    } catch (error) {
+      const err = error as DeepSeekError
       // Log the full error details
       console.error('DeepSeek service error:', {
-        message: error.message,
-        status: error.status,
-        statusText: error.statusText,
-        stack: error.stack,
-        response: error.response
+        message: err.message,
+        status: err.status,
+        statusText: err.statusText,
+        stack: err.stack,
+        response: err.response
       })
 
       let errorMessage = 'I encountered an error. Please try again later.'
-      if (error.response?.status === 401) {
+      if (err.response?.status === 401) {
         errorMessage = 'Authentication error. Please check the API key configuration.'
-      } else if (error.response?.status === 429) {
+      } else if (err.response?.status === 429) {
         errorMessage = 'Rate limit exceeded. Please try again in a moment.'
       }
 

@@ -1,3 +1,11 @@
+export type HistoricalDataPoint = [number, number] // [timestamp, value]
+
+export interface HistoricalData {
+  prices: HistoricalDataPoint[]
+  volumes: HistoricalDataPoint[]
+  marketCaps: HistoricalDataPoint[]
+}
+
 export interface CryptoAsset {
   symbol: string
   name: string
@@ -14,6 +22,7 @@ export interface CryptoAsset {
     circulatingSupply: number
     maxSupply: number | null
   }
+  historicalData?: HistoricalData
 }
 
 export interface TechnicalIndicators {
@@ -30,11 +39,21 @@ export interface TechnicalIndicators {
   }
 }
 
+export interface Article {
+  title: string
+  url: string
+  source: string
+  publishedAt: string
+  sentiment: 'positive' | 'negative' | 'neutral'
+}
+
 export interface MarketSentiment {
   news: 'positive' | 'neutral' | 'negative'
-  social: 'positive' | 'neutral' | 'negative'
   overall: 'positive' | 'neutral' | 'negative'
-  fearGreedIndex: number
+  symbol: string
+  social?: 'positive' | 'neutral' | 'negative'
+  fearGreedIndex?: number
+  articles?: Article[]
 }
 
 export interface WhaleAlert {

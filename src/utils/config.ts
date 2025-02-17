@@ -19,7 +19,7 @@ export const config = {
       baseUrl: 'https://api.binance.com/api/v3',
     },
     cryptopanic: {
-      apiKey: process.env.CRYPTOPANIC_API_KEY,
+      apiKey: process.env.NEXT_PUBLIC_CRYPTOPANIC_API_KEY || '',
       baseUrl: 'https://cryptopanic.com/api/v1',
     },
     whalealert: {

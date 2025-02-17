@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { config } from '../utils/config'
 import type { CryptoAsset, TechnicalIndicators, MarketSentiment } from '../types/crypto'
+import { cryptoPanicService, type SentimentAnalysis } from './cryptoPanicService'
 
 class CryptoService {
   private readonly coingeckoApi = axios.create({
@@ -18,7 +19,7 @@ class CryptoService {
   })
 
   private readonly cryptopanicApi = axios.create({
-    baseURL: 'https://cryptopanic.com/api/v1',
+    baseURL: config.crypto.cryptopanic.baseUrl,
     params: {
       auth_token: config.crypto.cryptopanic.apiKey,
       public: 'true' // Use public API to avoid CORS
@@ -103,9 +104,10 @@ class CryptoService {
         throw new Error(`Unsupported cryptocurrency symbol: ${symbol}. Only major cryptocurrencies are supported in the free tier.`)
       }
 
-      console.log('CryptoService: Fetching price data for', coinId)
+      console.log('CryptoService: Fetching data for', coinId)
       
-      const response = await this.coingeckoApi.get('/coins/' + coinId, {
+      // Fetch current price data
+      const priceResponse = await this.coingeckoApi.get('/coins/' + coinId, {
         params: {
           localization: false,
           tickers: false,
@@ -115,28 +117,48 @@ class CryptoService {
         }
       })
 
-      const data = response.data
-      if (!data?.market_data) {
+      // Fetch historical data (365 days)
+      console.log('CryptoService: Fetching historical data for', coinId)
+      const historyResponse = await this.coingeckoApi.get(`/coins/${coinId}/market_chart`, {
+        params: {
+          vs_currency: 'usd',
+          days: '365',
+          interval: 'daily'
+        }
+      })
+
+      const priceData = priceResponse.data
+      const historyData = historyResponse.data
+
+      if (!priceData?.market_data) {
         throw new Error(`No price data available for ${symbol}`)
       }
 
-      console.log('CryptoService: Successfully fetched price data:', data.market_data)
+      console.log('CryptoService: Successfully fetched data:', {
+        currentPrice: priceData.market_data.current_price.usd,
+        historicalDataPoints: historyData.prices.length
+      })
       
       return {
         symbol: upperSymbol,
-        name: data.name,
-        price: data.market_data.current_price.usd || 0,
-        change24h: data.market_data.price_change_percentage_24h || 0,
-        volume24h: data.market_data.total_volume.usd || 0,
-        marketCap: data.market_data.market_cap.usd || 0,
+        name: priceData.name,
+        price: priceData.market_data.current_price.usd || 0,
+        change24h: priceData.market_data.price_change_percentage_24h || 0,
+        volume24h: priceData.market_data.total_volume.usd || 0,
+        marketCap: priceData.market_data.market_cap.usd || 0,
         additionalData: {
-          athPrice: data.market_data.ath.usd,
-          athDate: data.market_data.ath_date.usd,
-          atlPrice: data.market_data.atl.usd,
-          atlDate: data.market_data.atl_date.usd,
-          totalSupply: data.market_data.total_supply,
-          circulatingSupply: data.market_data.circulating_supply,
-          maxSupply: data.market_data.max_supply
+          athPrice: priceData.market_data.ath.usd,
+          athDate: priceData.market_data.ath_date.usd,
+          atlPrice: priceData.market_data.atl.usd,
+          atlDate: priceData.market_data.atl_date.usd,
+          totalSupply: priceData.market_data.total_supply,
+          circulatingSupply: priceData.market_data.circulating_supply,
+          maxSupply: priceData.market_data.max_supply
+        },
+        historicalData: {
+          prices: historyData.prices, // [[timestamp, price], ...]
+          volumes: historyData.total_volumes, // [[timestamp, volume], ...]
+          marketCaps: historyData.market_caps // [[timestamp, marketCap], ...]
         }
       }
     } catch (error: any) {
@@ -183,15 +205,22 @@ class CryptoService {
         throw new Error(`Unsupported cryptocurrency symbol: ${symbol}. Only major cryptocurrencies are supported.`)
       }
 
-      // Return placeholder sentiment data during development
-      // This avoids CORS issues and API rate limits while testing
-      // Convert the symbol to our standardized format
+      // Get sentiment data from CryptoPanic
+      const cryptoPanicData = await cryptoPanicService.getNewsByCurrency(upperSymbol)
+      
+      // Map CryptoPanic sentiment to our format
       const sentiment: MarketSentiment = {
         symbol: upperSymbol,
-        overall: 'neutral' as const,
-        news: 'neutral' as const,
-        social: 'neutral' as const,
-        fearGreedIndex: 50
+        overall: cryptoPanicData.overallSentiment,
+        news: cryptoPanicData.overallSentiment, // Use the same sentiment for news since it's news-based
+        articles: cryptoPanicData.topArticles.map(article => ({
+          title: article.title,
+          url: article.url,
+          source: article.source.title,
+          publishedAt: article.published_at,
+          sentiment: article.votes.positive > article.votes.negative ? 'positive' : 
+                     article.votes.negative > article.votes.positive ? 'negative' : 'neutral'
+        }))
       }
       
       return sentiment
